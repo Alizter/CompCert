@@ -34,9 +34,9 @@ Record floatInfo := {
 Inductive encoding :=
   | EncNone                             (* no prefix *)
   | EncWide                             (* 'L' prefix *)
-  | EncUTF8                             (* 'u8' prefix (strings only) *)
   | EncU16                              (* 'u' prefix *)
-  | EncU32.                             (* 'U' prefix *)
+  | EncU32                              (* 'U' prefix *)
+  | EncUTF8.                            (* 'u8' prefix (strings only) *)
 
 Inductive structOrUnion :=
   | STRUCT | UNION.

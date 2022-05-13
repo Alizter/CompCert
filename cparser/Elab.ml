@@ -395,48 +395,63 @@ let elab_float_constant f =
   in
   (v, ty)
 
-let elab_char_constant loc wide chars =
-  let len = List.length chars in
-  let nbits = if wide then 8 * !config.sizeof_wchar else 8 in
-  let max_digit = Int64.shift_left 1L nbits in
-  (* Treat multi-character constants as a number in base 2^nbits.
-     It must fit in type int for a normal constant and in type wchar_t
-     for a wide constant. *)
-  let v =
-    if len > (if wide then 1 else !config.sizeof_int) then begin
-      error loc "%d-character constant too long for its type" len;
-      0L
-    end else
-      List.fold_left
-        (fun acc d ->
-          if d < 0L || d >= max_digit then
-            error loc "escape sequence is out of range (code 0x%LX)" d;
-          Int64.add (Int64.shift_left acc nbits) d)
-        0L chars in
-  (* C99 6.4.4.4 items 10 and 11:
-       single-character constant -> represent at type char
-       multi-character constant -> represent at type int
-       wide character constant -> represent at type wchar_t *)
-  Ceval.normalize_int v
-    (if wide then wchar_ikind() else if len = 1 then IChar else IInt)
-
-let elab_string_literal loc wide chars =
-  let nbits = if wide then 8 * !config.sizeof_wchar else 8 in
-  let char_max = Int64.shift_left 1L nbits in
+let check_char_range loc ikind chars =
+  let max = Int64.shift_left 1L (sizeof_ikind ikind * 8) in
   List.iter
     (fun c ->
-      if c < 0L || c >= char_max
-      then error loc "escape sequence is out of range (code 0x%LX)" c)
-    chars;
-  if wide then
-    CWStr chars
-  else begin
-    let res = Bytes.create (List.length chars) in
-    List.iteri
-      (fun i c -> Bytes.set res i (Char.unsafe_chr (Int64.to_int c)))
-      chars;
-    CStr (Bytes.to_string res)
-  end
+      if c < 0L || c >= max
+      then error loc "code point or escape sequence 0x%LX is out of range" c)
+    chars
+
+let ikind_of_encoding = function
+  | EncNone -> IChar
+  | EncWide -> wchar_ikind()
+  | EncU16 -> IUShort
+  | EncU32 -> IUInt
+  | EncUTF8 -> IChar
+
+let elab_char_constant loc enc chars =
+  let ikind = ikind_of_encoding enc in
+  check_char_range loc ikind chars;
+  let len = List.length chars in
+  (* We support multi-character constants for EncNone character literals only.
+     We treat them as big-endian numbers in base 256. *)
+  let v =
+    begin match chars, enc with
+    | [], _ -> error loc "empty character constant"; 0L
+    | [c], _ -> c
+    | _, EncNone ->
+      if len > !config.sizeof_int then begin
+        error loc "%d-character constant too long, overflows its type" len;
+        0L
+      end else
+        List.fold_left
+          (fun acc d -> Int64.(add (shift_left acc 8) d))
+          0L chars
+      end
+    | _, _ ->
+      error loc "%d-character constant not supported" len; 0L in
+  (* C11 6.4.4.4 items 10 and 11:
+       normal single-character constant -> represent at type char
+       multi-character constant -> represent at type int
+       L character constant -> represent at type wchar_t
+       u character constant -> represent at type char16_t
+       U character constant -> represent at type char32_t *)
+  Ceval.normalize_int v
+    (if enc = EncNone && len > 1 then IInt else ikind)
+
+let elab_string_literal loc enc chars =
+  let ikind = ikind_of_encoding enc in
+  check_char_range loc ikind chars;
+  match enc with
+  | EncNone | EncUTF8 ->
+      let res = Bytes.create (List.length chars) in
+      List.iteri
+        (fun i c -> Bytes.set res i (Char.unsafe_chr (Int64.to_int c)))
+        chars;
+      CStr (Bytes.to_string res)
+  | EncWide | EncU16 | EncU32 -> 
+      CWStr(chars, ik)
 
 let elab_constant loc = function
   | CONST_INT s ->
@@ -445,14 +460,20 @@ let elab_constant loc = function
   | CONST_FLOAT f ->
       let (v, fk) = elab_float_constant f in
       CFloat(v, fk)
-  | CONST_CHAR(wide, s) ->
-      let ikind = if wide then wchar_ikind () else IInt in
-      CInt(elab_char_constant loc wide s, ikind, "")
+  | CONST_CHAR(enc, s) ->
+      let ikind = if enc = EncNone then IInt else 
+        match enc with
+        | EncNone -> IInt
+        | EncWide -> wchar_ikind ()
+        | EncU16 -> IUShort
+        | EncU32 -> IUInt
+        | EncUTF8 -> assert false in
+      CInt(elab_char_constant loc enc s, ikind, "")
   | CONST_STRING(wide, s) ->
       elab_string_literal loc wide s
 
-let elab_simple_string loc wide chars =
-  match elab_string_literal loc wide chars with
+let elab_simple_string loc enc chars =
+  match elab_string_literal loc enc chars with
   | CStr s -> s
   | _ -> error loc "cannot use wide string literal in 'asm'"; ""
 
