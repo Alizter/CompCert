@@ -399,8 +399,7 @@ let check_char_range loc ikind chars =
   let max = Int64.shift_left 1L (sizeof_ikind ikind * 8) in
   List.iter
     (fun c ->
-      if c < 0L || c >= max
-      then error loc "code point or escape sequence 0x%LX is out of range" c)
+      if c >= max then error loc "escape sequence 0x%LX is out of range" c)
     chars
 
 let ikind_of_encoding = function
@@ -411,20 +410,19 @@ let ikind_of_encoding = function
   | EncUTF8 -> IChar
 
 let elab_char_constant loc enc chars =
-  let ikind = ikind_of_encoding enc in
-  check_char_range loc ikind chars;
   let len = List.length chars in
   (* We support multi-character constants for EncNone character literals only.
      We treat them as big-endian numbers in base 256. *)
   let v =
-    begin match chars, enc with
+    match chars, enc with
     | [], _ -> error loc "empty character constant"; 0L
     | [c], _ -> c
     | _, EncNone ->
       if len > !config.sizeof_int then begin
         error loc "%d-character constant too long, overflows its type" len;
         0L
-      end else
+      end else begin
+        check_char_range loc IUChar chars;
         List.fold_left
           (fun acc d -> Int64.(add (shift_left acc 8) d))
           0L chars
@@ -437,12 +435,17 @@ let elab_char_constant loc enc chars =
        L character constant -> represent at type wchar_t
        u character constant -> represent at type char16_t
        U character constant -> represent at type char32_t *)
-  Ceval.normalize_int v
-    (if enc = EncNone && len > 1 then IInt else ikind)
+  let ik =
+    if enc = EncNone && len > 1 then IInt else ikind_of_encoding enc in
+  let v' = Ceval.normalize_int v ik in
+  if v' <> v then
+    warning loc Constant_conversion
+      "overflow in character constant, changes value from %Ld to %Ld" v v';
+  v'
 
 let elab_string_literal loc enc chars =
-  let ikind = ikind_of_encoding enc in
-  check_char_range loc ikind chars;
+  let ik = ikind_of_encoding enc in
+  check_char_range loc ik chars;
   match enc with
   | EncNone | EncUTF8 ->
       let res = Bytes.create (List.length chars) in
@@ -461,7 +464,7 @@ let elab_constant loc = function
       let (v, fk) = elab_float_constant f in
       CFloat(v, fk)
   | CONST_CHAR(enc, s) ->
-      let ikind = if enc = EncNone then IInt else 
+      let ikind =
         match enc with
         | EncNone -> IInt
         | EncWide -> wchar_ikind ()
@@ -1615,12 +1618,12 @@ and elab_item zi item il =
       | CStr _, _ ->
           error loc "initialization of an array of non-char elements with a string literal";
           elab_list zi il false
-      | CWStr s, TInt(_, _) when compatible_types AttrIgnoreTop env ty_elt (TInt(wchar_ikind(), [])) ->
+      | CWStr(s, ik), TInt(_, _) when compatible_types AttrIgnoreTop env ty_elt (TInt(ik, [])) ->
           if not (I.index_below (Int64.of_int(List.length s - 1)) sz) then
             warning loc Unnamed "initializer string for array of wide chars %s is too long" (I.name zi);
           elab_list (I.set zi (init_int_array_wstring sz s)) il false
       | CWStr _, _ ->
-          error loc "initialization of an array of non-wchar_t elements with a wide string literal";
+          error loc "type mismatch between array destination and wide string literal";
           elab_list zi il false
       | _ -> assert false
       end
