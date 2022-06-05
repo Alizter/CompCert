@@ -6,7 +6,8 @@
    -w -unused-pattern-matching-variable
    -w -deprecated-ident-entry
    -w -deprecated-hint-rewrite-without-locality
-   -w -undeclared-scope))
+   -w -undeclared-scope)
+ (theories Flocq))
 
 (include_subdirs qualified)
 
